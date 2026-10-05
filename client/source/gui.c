@@ -5,6 +5,9 @@
 #include <string.h>
 
 #include "gui.h"
+#include "logoSmall.h"
+
+#define LOGO_TRANSPARENT_INDEX 0x5c
 
 static unsigned short *drawing_buffer;
 static unsigned short *bottom_framebuffer;
@@ -114,6 +117,47 @@ static void draw_text(unsigned int x, unsigned int y, const char *text,
     }
 }
 
+static void draw_text_scaled(unsigned int x, unsigned int y, const char *text,
+                             unsigned short color, unsigned int scale,
+                             unsigned int max_characters) {
+    unsigned int characters = 0;
+    while (*text != '\0' && characters < max_characters &&
+           x + 5 * scale < SCREEN_WIDTH) {
+        const unsigned char *rows = font[glyph_index(*text++)];
+        for (unsigned int row = 0; row < 7; row++) {
+            for (unsigned int column = 0; column < 5; column++) {
+                if (rows[row] & (1u << (4 - column))) {
+                    fill_rect(x + column * scale, y + row * scale,
+                              scale, scale, color);
+                }
+            }
+        }
+        x += 6 * scale;
+        characters++;
+    }
+}
+
+static void draw_logo_small(unsigned int x, unsigned int y,
+                            unsigned int output_width, unsigned int output_height) {
+    const unsigned char *bitmap = (const unsigned char *)logoSmallBitmap;
+    unsigned int x_step = (80u << 16) / output_width;
+    unsigned int y_step = (34u << 16) / output_height;
+    for (unsigned int row = 0; row < output_height; row++) {
+        unsigned int source_y = (row * y_step) >> 16;
+        for (unsigned int column = 0; column < output_width; column++) {
+            unsigned int source_x = (column * x_step) >> 16;
+            unsigned char palette_index = bitmap[source_y * 80 + source_x];
+            if (palette_index != LOGO_TRANSPARENT_INDEX) {
+                unsigned short color = logoSmallPal[palette_index] & 0x7fff;
+                if (drawing_buffer == bottom_framebuffer) {
+                    color |= BIT(15);
+                }
+                drawing_buffer[(y + row) * SCREEN_WIDTH + x + column] = color;
+            }
+        }
+    }
+}
+
 static void draw_wifi_signal_indicator(unsigned int x, unsigned int y,
                                        unsigned int strength) {
     unsigned short frame_color = strength == 0 ? RGB15(31, 0, 0) :
@@ -139,74 +183,16 @@ static void draw_wifi_signal_indicator(unsigned int x, unsigned int y,
     }
 }
 
-static void draw_top_screen(unsigned int query_length, unsigned int video_count,
-                            unsigned int selected_video, unsigned int wifi_strength,
-                            const char video_titles[GUI_RESULT_SLOTS][GUI_TITLE_CAPACITY]) {
-    unsigned short background = RGB15(26, 26, 25);
-    unsigned short panel = RGB15(31, 31, 31);
-    unsigned short accent = RGB15(26, 3, 3);
-    unsigned short ink = RGB15(5, 6, 7);
-    unsigned short muted = RGB15(18, 19, 19);
-    static const unsigned short swatches[] = {
-        RGB15(28, 9, 7), RGB15(7, 20, 28), RGB15(23, 17, 5), RGB15(9, 24, 13)
-    };
-
+static void draw_top_screen(unsigned int wifi_strength) {
+    unsigned short ink = RGB15(4, 5, 6);
+    unsigned short muted = RGB15(12, 12, 12);
     drawing_buffer = VRAM_A;
-    fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, background);
-    fill_rect(0, 0, SCREEN_WIDTH, 38, panel);
-    fill_rect(0, 36, SCREEN_WIDTH, 2, accent);
-    fill_rect(12, 10, 20, 20, accent);
-    fill_rect(20, 14, 3, 12, panel);
-    fill_rect(23, 17, 3, 6, panel);
-    draw_text(39, 10, "YOUTUBE VIDEO", ink, 17);
-    draw_text(39, 21, "NINTENDO DSI", muted, 18);
-    draw_wifi_signal_indicator(226, 9, wifi_strength);
+    fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, RGB15(31, 31, 31));
+    draw_logo_small(8, 4, 80, 34);
+    draw_wifi_signal_indicator(226, 7, wifi_strength);
 
-    fill_rect(12, 48, 232, 26, panel);
-    outline_rect(12, 48, 232, 26, muted);
-    draw_text(20, 57, "SEARCH", muted, 8);
-    unsigned int query_markers = query_length;
-    if (query_markers > 22) {
-        query_markers = 22;
-    }
-    for (unsigned int index = 0; index < query_markers; index++) {
-        fill_rect(76 + index * 7, 56, 4, 9, accent);
-    }
-    fill_rect(76 + query_markers * 7, 56, 3, 9, ink);
-
-    fill_rect(12, 84, 232, 74, RGB15(29, 29, 28));
-    outline_rect(12, 84, 232, 74, muted);
-    fill_rect(18, 90, 130, 62, swatches[selected_video % 4]);
-    for (unsigned int stripe = 0; stripe < 5; stripe++) {
-        fill_rect(22 + stripe * 24, 94, 12, 54,
-                 stripe % 2 ? RGB15(8, 15, 20) : RGB15(13, 20, 18));
-    }
-    fill_rect(18, 126, 130, 26, RGB15(3, 4, 5));
-    fill_rect(30, 137, 30, 3, RGB15(20, 22, 17));
-    fill_rect(66, 137, 44, 3, RGB15(12, 17, 16));
-    fill_rect(92, 110, 28, 28, accent);
-    for (unsigned int row = 0; row < 28; row++) {
-        unsigned int width = row < 14 ? row * 2 + 1 : (27 - row) * 2 + 1;
-        fill_rect(101, 116 + row, width, 1, panel);
-    }
-
-    draw_text(158, 92, video_count ? video_titles[selected_video] : "READY TO SEARCH",
-              ink, 13);
-    fill_rect(158, 103, 58, 3, muted);
-    fill_rect(158, 111, 70, 3, muted);
-    fill_rect(158, 119, 46, 3, muted);
-    fill_rect(158, 132, 6, 6, video_count ? RGB15(5, 24, 8) : RGB15(24, 16, 4));
-    fill_rect(169, 133, video_count ? 58 : 34, 4, accent);
-
-    fill_rect(12, 168, 232, 12, panel);
-    for (unsigned int index = 0; index < GUI_RESULT_SLOTS; index++) {
-        unsigned int x = 16 + index * 28;
-        unsigned short color = index < video_count ? accent : muted;
-        fill_rect(x, 171, 22, 6, color);
-        if (index == selected_video && video_count > 0) {
-            outline_rect(x - 2, 168, 26, 12, ink);
-        }
-    }
+    draw_text_scaled(76, 68, "SEARCH", ink, 3, 10);
+    draw_text(62, 105, "FIND VIDEOS ON YOUTUBE", muted, 24);
 }
 
 static void draw_search_button(void) {
@@ -290,12 +276,7 @@ static void draw_bottom_screen(const char *query, char next_character,
 
     drawing_buffer = bottom_framebuffer;
     fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, RGB15(28, 28, 27));
-    fill_rect(0, 0, SCREEN_WIDTH, 29, RGB15(25, 3, 3));
-    fill_rect(8, 6, 17, 17, paper);
-    fill_rect(15, 9, 2, 11, RGB15(25, 3, 3));
-    fill_rect(18, 12, 3, 5, RGB15(25, 3, 3));
-    draw_text(33, 7, "YOUTUBE", paper, 9);
-    draw_text(194, 10, "WIFI", RGB15(31, 26, 24), 5);
+    fill_rect(0, 0, SCREEN_WIDTH, 29, paper);
     draw_wifi_signal_indicator(229, 6, wifi_strength);
 
     fill_rect(7, 34, 242, 28, paper);
@@ -381,25 +362,49 @@ void gui_draw_video_frame(const unsigned char *frame) {
 }
 
 void gui_draw_player(const char *title, unsigned int frame_index, int paused,
-                     unsigned int volume, unsigned int wifi_strength) {
+                     unsigned int duration_seconds, unsigned int volume,
+                     unsigned int wifi_strength) {
     drawing_buffer = bottom_framebuffer;
-    fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, RGB15(28, 28, 27));
-    fill_rect(0, 0, SCREEN_WIDTH, 30, RGB15(25, 3, 3));
-    draw_text(10, 10, "YOUTUBE PLAYER", RGB15(31, 31, 31), 20);
+    unsigned short paper = RGB15(31, 31, 31);
+    unsigned short ink = RGB15(4, 5, 6);
+    fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, RGB15(29, 29, 28));
+    fill_rect(0, 0, SCREEN_WIDTH, 29, paper);
+    draw_logo_small(9, 2, 60, 25);
     draw_wifi_signal_indicator(229, 6, wifi_strength);
-    draw_text(10, 40, title, RGB15(4, 6, 7), 38);
-    fill_rect(10, 59, 236, 2, RGB15(19, 19, 18));
 
+    draw_text(10, 38, title, ink, 34);
+    fill_rect(10, 54, 25, 25, RGB15(20, 17, 13));
+    fill_rect(12, 56, 21, 21, RGB15(22, 8, 6));
+    fill_rect(16, 61, 13, 2, RGB15(31, 25, 18));
+    fill_rect(16, 66, 8, 2, RGB15(31, 25, 18));
+    draw_text(42, 58, "NDSTUBE", ink, 12);
+    draw_text(42, 69, "LAN VIDEO", RGB15(12, 12, 11), 12);
+
+    unsigned int max_seconds = duration_seconds == 0 ? 120 : duration_seconds;
+    if (max_seconds > 120) {
+        max_seconds = 120;
+    }
     unsigned int seconds = frame_index / 6;
+    if (seconds > max_seconds) {
+        seconds = max_seconds;
+    }
     char elapsed[12];
+    char duration[12];
     snprintf(elapsed, sizeof(elapsed), "%02u:%02u", seconds / 60, seconds % 60);
-    draw_text(10, 69, elapsed, RGB15(4, 6, 7), 8);
-    fill_rect(51, 72, 195, 8, RGB15(20, 20, 19));
-    fill_rect(51, 72, seconds < 120 ? seconds * 195 / 120 : 195, 8,
+    draw_text(10, 91, elapsed, ink, 8);
+    snprintf(duration, sizeof(duration), "%02u:%02u", max_seconds / 60, max_seconds % 60);
+    draw_text(211, 91, duration, ink, 6);
+    fill_rect(10, 102, 236, 13, RGB15(0, 0, 0));
+    fill_rect(12, 104, 232, 9, RGB15(31, 31, 31));
+    unsigned int progress = frame_index * 232 / (max_seconds * 6);
+    if (progress > 232) {
+        progress = 232;
+    }
+    fill_rect(12, 104, progress, 9,
               RGB15(25, 3, 3));
-    draw_text(10, 95, "VOLUME", RGB15(8, 8, 8), 10);
-    fill_rect(55, 98, 145, 7, RGB15(20, 20, 19));
-    fill_rect(55, 98, volume * 145 / 127, 7, RGB15(8, 18, 11));
+    draw_text(10, 122, "VOLUME", RGB15(8, 8, 8), 10);
+    fill_rect(55, 124, 145, 7, RGB15(20, 20, 19));
+    fill_rect(55, 124, volume * 145 / 127, 7, RGB15(8, 18, 11));
 
     const char *labels[] = {"VOL-", paused ? "PLAY" : "PAUSE", "STOP", "VOL+"};
     for (unsigned int button = 0; button < 4; button++) {
@@ -434,8 +439,12 @@ void gui_draw(const char *query, char next_character, const char *status_text,
               const char video_titles[GUI_RESULT_SLOTS][GUI_TITLE_CAPACITY],
               unsigned int video_count, unsigned int selected_video,
           unsigned int wifi_strength, int keyboard_visible) {
-    draw_top_screen((unsigned int)strlen(query), video_count, selected_video,
-              wifi_strength, video_titles);
+    (void)next_character;
+    (void)status_text;
+    (void)video_titles;
+    (void)video_count;
+    (void)selected_video;
+    draw_top_screen(wifi_strength);
     draw_bottom_screen(query, next_character, status_text, video_titles,
                  video_count, selected_video, wifi_strength, keyboard_visible);
 }

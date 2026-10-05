@@ -38,7 +38,8 @@ GuiTouchAction gui_touch_action(unsigned int x, unsigned int y,
                                char *key_character);
 void gui_draw_video_frame(const unsigned char *frame);
 void gui_draw_player(const char *title, unsigned int frame_index, int paused,
-                     unsigned int volume, unsigned int wifi_strength);
+                     unsigned int duration_seconds, unsigned int volume,
+                     unsigned int wifi_strength);
 GuiPlayerTouchAction gui_player_touch_action(unsigned int x, unsigned int y);
 
 #endif

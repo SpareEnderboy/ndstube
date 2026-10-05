@@ -29,6 +29,7 @@ static unsigned int query_length;
 static unsigned int alphabet_index = 1;
 static char video_ids[MAX_RESULTS][12];
 static char video_titles[MAX_RESULTS][GUI_TITLE_CAPACITY];
+static unsigned int video_durations[MAX_RESULTS];
 static unsigned int video_count;
 static unsigned int selected_video;
 static unsigned char video_frame[VIDEO_FRAME_SIZE];
@@ -55,6 +56,26 @@ static int send_all(int socket_fd, const char *data, unsigned int length) {
         sent += (unsigned int)count;
     }
     return 1;
+}
+
+static unsigned int parse_video_duration(const char *text) {
+    unsigned int seconds = 0;
+    if (*text == '\0') {
+        return 0;
+    }
+    while (*text != '\0') {
+        if (*text < '0' || *text > '9') {
+            return 0;
+        }
+        if (seconds < 120) {
+            seconds = seconds * 10 + (unsigned int)(*text - '0');
+            if (seconds > 120) {
+                seconds = 120;
+            }
+        }
+        text++;
+    }
+    return seconds;
 }
 
 static int connect_relay(const char *resource) {
@@ -204,16 +225,19 @@ static void copy_result_rows(char *response) {
         char *id_end = strchr(body, '\t');
         if (id_end != NULL && (unsigned int)(id_end - body) == 11) {
             *id_end = '\0';
-            char *duration_end = strchr(id_end + 1, '\t');
-            if (duration_end != NULL) {
+            char *title_separator = strchr(id_end + 1, '\t');
+            if (title_separator != NULL) {
+                *title_separator = '\0';
+                video_durations[video_count] = parse_video_duration(id_end + 1);
+                char *title = title_separator + 1;
                 size_t title_length;
                 strncpy(video_ids[video_count], body, sizeof(video_ids[video_count]) - 1);
                 video_ids[video_count][sizeof(video_ids[video_count]) - 1] = '\0';
-                title_length = strlen(duration_end + 1);
+                title_length = strlen(title);
                 if (title_length >= sizeof(video_titles[video_count])) {
                     title_length = sizeof(video_titles[video_count]) - 1;
                 }
-                memcpy(video_titles[video_count], duration_end + 1, title_length);
+                memcpy(video_titles[video_count], title, title_length);
                 video_titles[video_count][title_length] = '\0';
                 video_count++;
             }
@@ -326,14 +350,16 @@ static int reader_read_nonblocking(SocketReader *reader, unsigned char *output,
 
 static int read_video_payload(SocketReader *reader, unsigned char *output,
                               unsigned int wanted, unsigned int *copied,
-                              const char *title, unsigned int frame_index,
+                              const char *title, unsigned int duration_seconds,
+                              unsigned int frame_index,
                               int *playing, int *paused, int audio_channel,
                               unsigned int *volume) {
     while (*playing && *copied < wanted && pmMainLoop()) {
         scanKeys();
         if (update_player_controls(keysDown(), playing, paused,
                                    audio_channel, volume)) {
-            gui_draw_player(title, frame_index, *paused, *volume, wifi_strength);
+            gui_draw_player(title, frame_index, *paused, duration_seconds,
+                            *volume, wifi_strength);
         }
         if (!*playing) {
             return 0;
@@ -341,7 +367,8 @@ static int read_video_payload(SocketReader *reader, unsigned char *output,
         if (*paused) {
             swiWaitForVBlank();
             if (refresh_wifi_strength()) {
-                gui_draw_player(title, frame_index, *paused, *volume, wifi_strength);
+                gui_draw_player(title, frame_index, *paused, duration_seconds,
+                                *volume, wifi_strength);
             }
             continue;
         }
@@ -353,7 +380,8 @@ static int read_video_payload(SocketReader *reader, unsigned char *output,
         if (result == 0) {
             swiWaitForVBlank();
             if (refresh_wifi_strength()) {
-                gui_draw_player(title, frame_index, *paused, *volume, wifi_strength);
+                gui_draw_player(title, frame_index, *paused, duration_seconds,
+                                *volume, wifi_strength);
             }
         }
     }
@@ -399,19 +427,23 @@ static void play_selected_video(void) {
     int playing = 1;
     int paused = 0;
     unsigned int volume = 96;
+    unsigned int duration_seconds = video_durations[selected_video];
     wifi_strength = read_wifi_strength();
-    gui_draw_player(video_titles[selected_video], frame_index, paused, volume, wifi_strength);
+    gui_draw_player(video_titles[selected_video], frame_index, paused,
+                    duration_seconds, volume, wifi_strength);
     while (playing && pmMainLoop()) {
         scanKeys();
         if (update_player_controls(keysDown(), &playing, &paused, audio_channel, &volume)) {
-            gui_draw_player(video_titles[selected_video], frame_index, paused, volume, wifi_strength);
+            gui_draw_player(video_titles[selected_video], frame_index, paused,
+                            duration_seconds, volume, wifi_strength);
         }
         if (!playing) {
             break;
         }
         unsigned int frame_bytes = 0;
         if (!read_video_payload(&reader, video_frame, sizeof(video_frame), &frame_bytes,
-                                video_titles[selected_video], frame_index, &playing,
+                                video_titles[selected_video], duration_seconds,
+                                frame_index, &playing,
                                 &paused, audio_channel, &volume)) {
             break;
         }
@@ -420,7 +452,8 @@ static void play_selected_video(void) {
         unsigned int sample_count = sample_end - sample_start;
         unsigned int audio_bytes = 0;
         if (!read_video_payload(&reader, (unsigned char *)audio_block, sample_count,
-                                &audio_bytes, video_titles[selected_video], frame_index,
+                                &audio_bytes, video_titles[selected_video],
+                                duration_seconds, frame_index,
                                 &playing, &paused, audio_channel, &volume)) {
             break;
         }
@@ -435,7 +468,7 @@ static void play_selected_video(void) {
             swiWaitForVBlank();
             if (refresh_wifi_strength()) {
                 gui_draw_player(video_titles[selected_video], frame_index, paused,
-                                volume, wifi_strength);
+                                duration_seconds, volume, wifi_strength);
             }
             if (!pmMainLoop()) {
                 playing = 0;
@@ -445,7 +478,7 @@ static void play_selected_video(void) {
             if (update_player_controls(keysDown(), &playing, &paused,
                                        audio_channel, &volume)) {
                 gui_draw_player(video_titles[selected_video], frame_index, paused,
-                                volume, wifi_strength);
+                                duration_seconds, volume, wifi_strength);
             }
             if (!playing) {
                 break;
@@ -456,7 +489,7 @@ static void play_selected_video(void) {
                 if (update_player_controls(keysDown(), &playing, &paused,
                                            audio_channel, &volume)) {
                     gui_draw_player(video_titles[selected_video], frame_index, paused,
-                                    volume, wifi_strength);
+                                    duration_seconds, volume, wifi_strength);
                 }
             }
             if (!playing) {
@@ -467,7 +500,7 @@ static void play_selected_video(void) {
         frame_index++;
         if (frame_index % VIDEO_FPS == 0) {
             gui_draw_player(video_titles[selected_video], frame_index, paused,
-                            volume, wifi_strength);
+                            duration_seconds, volume, wifi_strength);
         }
     }
     soundKill(audio_channel);

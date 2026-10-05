@@ -17,7 +17,7 @@ GAME_SUBTITLE2 :=
 TARGET := ndstube
 BUILD := build
 SOURCES := client/source
-INCLUDES :=
+INCLUDES := .
 ARCH := -march=armv5te -mtune=arm946e-s -mthumb
 CFLAGS := -g -Wall -Wextra -O2 -ffunction-sections -fdata-sections $(ARCH)
 CFLAGS += $(INCLUDE) -DARM9
@@ -32,7 +32,7 @@ $(GAME_ICON): $(ICON_ASSETS)/icon.h $(ICON_ASSETS)/icon.img.bin $(ICON_ASSETS)/i
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 export OUTPUT := $(CURDIR)/$(TARGET)
-export VPATH := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
+export VPATH := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) $(CURDIR)
 export DEPSDIR := $(CURDIR)/$(BUILD)
 export LD := $(CC)
 export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
@@ -40,7 +40,7 @@ export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 CFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-export OFILES := $(CFILES:.c=.o)
+export OFILES := $(CFILES:.c=.o) logoSmall.o
 DEPENDS := $(OFILES:.o=.d)
 
 .PHONY: all clean $(BUILD)
