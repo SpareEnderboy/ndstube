@@ -2,6 +2,9 @@ DEVKITPRO ?= /opt/devkitpro
 DEVKITARM ?= $(DEVKITPRO)/devkitARM
 .DEFAULT_GOAL := all
 
+# 1. EXPORT DEVKITPRO SO SUB-SHELLS AND NDSTOOL CAN FIND THE DEFAULT ARM7 CORE
+export DEVKITPRO
+
 PROJECT_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 ICON_ASSETS := $(PROJECT_ROOT)assets
 GAME_ICON := $(PROJECT_ROOT)build/icon.bmp
@@ -11,9 +14,14 @@ $(error DEVKITARM is not set. Export the installed devkitPro devkitARM path.)
 endif
 
 include $(DEVKITARM)/ds_rules
+
+# 2. DEFINE DEVKITPRO-PROOF SPACE VARIABLE FOR SUBTITLE 2
 GAME_TITLE := ndstube
 GAME_SUBTITLE1 := YouTube for DSi
-GAME_SUBTITLE2 :=
+EMPTY :=
+SPACE := $(EMPTY) $(EMPTY)
+GAME_SUBTITLE2 := $(SPACE)
+
 TARGET := ndstube
 BUILD := build
 SOURCES := client/source
@@ -57,6 +65,11 @@ DEPENDS := $(OFILES:.o=.d)
 
 .PHONY: all
 all: $(OUTPUT).nds
+
+# Explicitly override the rule using your toolchain's modern ARM7 variable
+%.nds: %.elf
+	@echo "Packaging NDS ROM without GAME_SUBTITLE2..."
+	@ndstool -c $@ -9 $< $(_ARM7_ELF) -b $(GAME_ICON) "$(GAME_TITLE);$(GAME_SUBTITLE1)"
 
 $(OUTPUT).nds: $(GAME_ICON)
 $(OUTPUT).nds: $(OUTPUT).elf
