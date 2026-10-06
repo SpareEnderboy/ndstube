@@ -380,19 +380,17 @@ void gui_draw_player(const char *title, unsigned int frame_index, int paused,
     draw_text(42, 58, "NDSTUBE", ink, 12);
     draw_text(42, 69, "LAN VIDEO", RGB15(12, 12, 11), 12);
 
-    unsigned int max_seconds = duration_seconds == 0 ? 120 : duration_seconds;
-    if (max_seconds > 120) {
-        max_seconds = 120;
-    }
+    unsigned int max_seconds = duration_seconds == 0 ? 1U : duration_seconds;
+    unsigned int display_seconds = duration_seconds == 0 ? 0U : duration_seconds;
     unsigned int seconds = frame_index / 6;
-    if (seconds > max_seconds) {
-        seconds = max_seconds;
+    if (seconds > display_seconds) {
+        seconds = display_seconds;
     }
     char elapsed[12];
     char duration[12];
     snprintf(elapsed, sizeof(elapsed), "%02u:%02u", seconds / 60, seconds % 60);
     draw_text(10, 91, elapsed, ink, 8);
-    snprintf(duration, sizeof(duration), "%02u:%02u", max_seconds / 60, max_seconds % 60);
+    snprintf(duration, sizeof(duration), "%02u:%02u", display_seconds / 60, display_seconds % 60);
     draw_text(211, 91, duration, ink, 6);
     fill_rect(10, 102, 236, 13, RGB15(0, 0, 0));
     fill_rect(12, 104, 232, 9, RGB15(31, 31, 31));

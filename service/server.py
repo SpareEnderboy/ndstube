@@ -21,7 +21,6 @@ VIDEO_WIDTH = 128
 VIDEO_HEIGHT = 96
 VIDEO_FPS = 6
 AUDIO_RATE = 8000
-MAX_VIDEO_SECONDS = 120
 VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
 FASTVIDEO_CACHE_DIR = Path(os.environ.get(
     "NDSTUBE_FASTVIDEO_CACHE", Path.home() / ".cache" / "ndstube" / "fastvideo"
@@ -71,7 +70,7 @@ def parse_video_id(raw_video_id: str) -> str:
 def video_frame_count(duration: float) -> int:
     if duration <= 0:
         raise ValueError("video has no finite duration")
-    return min(math.ceil(duration * VIDEO_FPS), MAX_VIDEO_SECONDS * VIDEO_FPS)
+    return math.ceil(duration * VIDEO_FPS)
 
 
 def resolve_video(video_id: str) -> tuple[str, str, float]:
@@ -148,10 +147,6 @@ def _download_fastvideo_source(video_id: str, directory: Path) -> Path:
         "format": "bestvideo[height<=240]+bestaudio/bestvideo+bestaudio/best",
         "outtmpl": str(directory / "source.%(ext)s"),
         "merge_output_format": "mkv",
-        "download_ranges": lambda _info, _downloader: [{
-            "start_time": 0,
-            "end_time": MAX_VIDEO_SECONDS,
-        }],
         "force_keyframes_at_cuts": True,
     }
     with yt_dlp.YoutubeDL(options) as downloader:

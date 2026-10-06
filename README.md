@@ -2,7 +2,7 @@
 
 `ndstube` is a Nintendo DS/DSi homebrew YouTube client backed by an Arch Linux relay. The client searches YouTube, lists results, and plays a low-resolution video with mono audio over local Wi-Fi. The relay uses yt-dlp to resolve separate audio/video streams and FFmpeg to convert them into RGB8 frames and signed PCM samples for libnds playback.
 
-Playback is intentionally limited to 128x96 pixels, 6 frames per second, 8 kHz mono audio, and the first 120 seconds. Audio and video are interleaved in each frame interval over one connection. The raw stream is about 654 kbps before network overhead, so performance depends on the DSi's Wi-Fi link. DSi hardware has tight CPU, memory, and Wi-Fi limits; this does not make arbitrary YouTube streams directly playable on the console.
+Playback is intentionally limited to 128x96 pixels, 6 frames per second, and 8 kHz mono audio. Audio and video are interleaved in each frame interval over one connection, and the relay no longer truncates the stream to a 120-second cap. The raw stream is about 654 kbps before network overhead for a 120-second example, so longer videos depend on the DSi's Wi-Fi link and CPU headroom. DSi hardware has tight CPU, memory, and Wi-Fi limits; this does not make arbitrary YouTube streams directly playable on the console.
 
 ## Requirements
 
@@ -46,7 +46,7 @@ Set `NDSTUBE_PORT` to change the port. Allow inbound TCP on that port only from 
 
 ### FastVideoDS SD Handoff
 
-The bottom-screen `GET FV` action requests `/fastvideo?id=VIDEO_ID`. The relay downloads up to the first 120 seconds, runs the separate FastVideoDS encoder, and caches the resulting `.fv` file under `~/.cache/ndstube/fastvideo`. The client streams it to `sd:/testVideo.fv`; after it reports completion, launch FastVideoDS Player from the DSi menu to play that file. This is an SD-card handoff, not in-app FastVideoDS playback.
+The bottom-screen `GET FV` action requests `/fastvideo?id=VIDEO_ID`. The relay downloads the selected video without the old 120-second cap, runs the separate FastVideoDS encoder, and caches the resulting `.fv` file under `~/.cache/ndstube/fastvideo`. The client streams it to `sd:/testVideo.fv`; after it reports completion, launch FastVideoDS Player from the DSi menu to play that file. This is an SD-card handoff, not in-app FastVideoDS playback.
 
 Build the upstream encoder on an x86-64 host with AVX2 and the .NET SDK, following [FastVideoDSEncoder](https://github.com/Gericom/FastVideoDSEncoder). Its FFmpeg.AutoGen 5.1 binding requires FFmpeg 5.1 shared libraries; the encoder's published `x64` folder only contains Windows DLLs. With micromamba installed, create an isolated compatible runtime and publish the encoder to a persistent user-local directory:
 

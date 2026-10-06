@@ -53,12 +53,12 @@ class SearchFormattingTests(unittest.TestCase):
         row = format_result({"id": "abc123", "title": "A\ttitle\nwith lines", "duration": 42.9})
         self.assertEqual(row, "abc123\t42\tA title with lines\n")
 
-    def test_video_ids_and_frame_counts_are_bounded(self):
+    def test_video_ids_and_frame_counts_are_unbounded(self):
         self.assertEqual(parse_video_id("abcdefghijk"), "abcdefghijk")
         with self.assertRaises(ValueError):
             parse_video_id("invalid")
         self.assertEqual(video_frame_count(1), VIDEO_FPS)
-        self.assertEqual(video_frame_count(1000), 120 * VIDEO_FPS)
+        self.assertEqual(video_frame_count(1000), 1000 * VIDEO_FPS)
         self.assertEqual(sum(audio_samples_for_frame(index) for index in range(VIDEO_FPS)), AUDIO_RATE)
         with self.assertRaises(ValueError):
             video_frame_count(0)
@@ -142,7 +142,7 @@ class FastVideoTests(unittest.TestCase):
                 server.server_close()
                 thread.join()
 
-    def test_source_download_is_limited_to_relay_max_duration(self):
+    def test_source_download_uses_complete_video_when_no_cap_is_set(self):
         captured = {}
 
         class FakeYoutubeDL:
@@ -164,10 +164,7 @@ class FastVideoTests(unittest.TestCase):
             source_path = _download_fastvideo_source("abcdefghijk", Path(directory))
 
         self.assertEqual(source_path.suffix, ".mkv")
-        self.assertEqual(captured["download_ranges"]({}, None), [{
-            "start_time": 0,
-            "end_time": 120,
-        }])
+        self.assertNotIn("download_ranges", captured)
         self.assertTrue(captured["force_keyframes_at_cuts"])
 
     def test_video_route_streams_sized_rgb8_frames(self):

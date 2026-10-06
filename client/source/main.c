@@ -133,12 +133,7 @@ static unsigned int parse_video_duration(const char *text) {
         if (*text < '0' || *text > '9') {
             return 0;
         }
-        if (seconds < 120) {
-            seconds = seconds * 10 + (unsigned int)(*text - '0');
-            if (seconds > 120) {
-                seconds = 120;
-            }
-        }
+        seconds = seconds * 10 + (unsigned int)(*text - '0');
         text++;
     }
     return seconds;
