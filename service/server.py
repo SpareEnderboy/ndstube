@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -184,20 +185,28 @@ def ensure_fastvideo_file(video_id: str) -> Path:
         with tempfile.TemporaryDirectory(prefix="ndstube-fastvideo-") as temporary_directory:
             temporary_path = Path(temporary_directory)
             source_file = _download_fastvideo_source(video_id, temporary_path)
-            output_file = temporary_path / "output.fv"
-            subprocess.run(
-                [*encoder_command, str(source_file), str(output_file)],
-                check=True,
-                timeout=1800,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+            fd, output_name = tempfile.mkstemp(
+                prefix=f".{video_id}.", suffix=".tmp.fv", dir=FASTVIDEO_CACHE_DIR
             )
-            if not output_file.is_file() or output_file.stat().st_size < 0x1C:
-                raise RuntimeError("FastVideoDSEncoder did not produce a valid .fv file")
-            with output_file.open("rb") as encoded:
-                if encoded.read(4) != b"FVDS":
-                    raise RuntimeError("FastVideoDSEncoder output has an invalid FVDS signature")
-            os.replace(output_file, cached_file)
+            os.close(fd)
+            output_file = Path(output_name)
+            try:
+                subprocess.run(
+                    [*encoder_command, str(source_file), str(output_file)],
+                    check=True,
+                    timeout=1800,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                if not output_file.is_file() or output_file.stat().st_size < 0x1C:
+                    raise RuntimeError("FastVideoDSEncoder did not produce a valid .fv file")
+                with output_file.open("rb") as encoded:
+                    if encoded.read(4) != b"FVDS":
+                        raise RuntimeError("FastVideoDSEncoder output has an invalid FVDS signature")
+                os.replace(output_file, cached_file)
+            finally:
+                with suppress(FileNotFoundError):
+                    output_file.unlink()
     return cached_file
 
 

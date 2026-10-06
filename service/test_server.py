@@ -105,6 +105,7 @@ class FastVideoTests(unittest.TestCase):
                 return source
 
             def encode(command, **kwargs):
+                self.assertEqual(Path(command[-1]).parent, cache_path)
                 Path(command[-1]).write_bytes(encoded)
                 return None
 

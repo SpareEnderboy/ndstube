@@ -472,7 +472,7 @@ static void download_selected_fastvideo(void) {
     if (!reader_read_headers_timeout(&reader, headers, sizeof(headers),
                                      FASTVIDEO_PREP_TIMEOUT_FRAMES) ||
         strstr(headers, " 200 ") == NULL) {
-        snprintf(status_text, sizeof(status_text), "FastVideo relay failed. Configure encoder.");
+        snprintf(status_text, sizeof(status_text), "FastVideo relay failed. Check relay log.");
         closesocket(socket_fd);
         return;
     }
