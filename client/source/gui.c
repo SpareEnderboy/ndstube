@@ -317,7 +317,7 @@ static void draw_bottom_screen(const char *query, char next_character,
 
         fill_rect(0, 149, SCREEN_WIDTH, 14, RGB15(24, 24, 23));
         draw_text(7, 152, status_text, paper, 39);
-        const char *button_labels[] = {"CHAR", "ADD", "DEL", "WATCH"};
+        const char *button_labels[] = {"GET FV", "ADD", "DEL", "WATCH"};
         for (unsigned int button = 0; button < 4; button++) {
             unsigned int x = 4 + button * 63;
             unsigned short color = button == 3 ? RGB15(25, 3, 3) : RGB15(23, 23, 22);
@@ -495,7 +495,7 @@ GuiTouchAction gui_touch_action(unsigned int x, unsigned int y,
     if (!keyboard_visible && y >= 166) {
         switch (x / 64) {
         case 0:
-            return GUI_TOUCH_CHARACTER;
+            return GUI_TOUCH_DOWNLOAD;
         case 1:
             return GUI_TOUCH_ADD;
         case 2:

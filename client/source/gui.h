@@ -15,6 +15,7 @@ typedef enum {
     GUI_TOUCH_CHARACTER,
     GUI_TOUCH_ADD,
     GUI_TOUCH_DELETE,
+    GUI_TOUCH_DOWNLOAD,
     GUI_TOUCH_WATCH,
     GUI_TOUCH_RESULT
 } GuiTouchAction;

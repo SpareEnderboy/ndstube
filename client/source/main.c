@@ -1,6 +1,7 @@
 #include <nds.h>
 #include <dswifi9.h>
 #include "gui.h"
+#include <fat.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -8,6 +9,7 @@
 #include <sys/socket.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define SERVER_IP "172.20.50.68"
@@ -22,6 +24,9 @@
 #define AUDIO_BLOCK_SIZE ((AUDIO_RATE + VIDEO_FPS - 1) / VIDEO_FPS)
 #define SOCKET_BUFFER_SIZE 8192
 #define VIDEO_RECV_BUFFER_SIZE (32 * 1024)
+#define REQUEST_TIMEOUT_FRAMES 600
+#define FASTVIDEO_PREP_TIMEOUT_FRAMES (10 * 60 * 60)
+#define FASTVIDEO_MAX_FILE_SIZE (64UL * 1024 * 1024)
 
 static const char alphabet[] = " abcdefghijklmnopqrstuvwxyz0123456789-";
 static char query[64];
@@ -38,6 +43,7 @@ static char status_text[80] = "Set the relay IP in source, then search.";
 static int wifi_initialized;
 static unsigned int wifi_strength;
 static unsigned int wifi_refresh_frames;
+static int fat_initialized;
 
 typedef struct {
     int socket_fd;
@@ -46,16 +52,76 @@ typedef struct {
     unsigned int length;
 } SocketReader;
 
+static int network_wait_frame(void) {
+    if (!pmMainLoop()) {
+        return 0;
+    }
+    scanKeys();
+    if (keysDown() & KEY_B) {
+        return 0;
+    }
+    swiWaitForVBlank();
+    return 1;
+}
+
 static int send_all(int socket_fd, const char *data, unsigned int length) {
     unsigned int sent = 0;
+    unsigned int waited_frames = 0;
     while (sent < length) {
         int count = send(socket_fd, data + sent, length - sent, 0);
+        if (count > 0) {
+            sent += (unsigned int)count;
+            waited_frames = 0;
+            continue;
+        }
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK ||
+                          errno == EINPROGRESS || errno == EALREADY)) {
+            if (++waited_frames >= REQUEST_TIMEOUT_FRAMES || !network_wait_frame()) {
+                return 0;
+            }
+            continue;
+        }
         if (count <= 0) {
             return 0;
         }
-        sent += (unsigned int)count;
     }
     return 1;
+}
+
+static int ensure_wifi_associated(void) {
+    if (!wifi_initialized) {
+        snprintf(status_text, sizeof(status_text), "Connecting to configured Wi-Fi...");
+        if (!Wifi_InitDefault(WFC_CONNECT)) {
+            snprintf(status_text, sizeof(status_text), "Wi-Fi setup failed; check console settings.");
+            return 0;
+        }
+        wifi_initialized = 1;
+    }
+    if (Wifi_AssocStatus() == ASSOCSTATUS_ASSOCIATED) {
+        return 1;
+    }
+
+    snprintf(status_text, sizeof(status_text), "Reconnecting to Wi-Fi...");
+    Wifi_AutoConnect();
+    unsigned int waited_frames = 0;
+    unsigned int retry_frames = 0;
+    while (waited_frames < REQUEST_TIMEOUT_FRAMES) {
+        int association = Wifi_AssocStatus();
+        if (association == ASSOCSTATUS_ASSOCIATED) {
+            return 1;
+        }
+        if (association == ASSOCSTATUS_DISCONNECTED && retry_frames >= 120) {
+            Wifi_AutoConnect();
+            retry_frames = 0;
+        }
+        if (!network_wait_frame()) {
+            return 0;
+        }
+        waited_frames++;
+        retry_frames++;
+    }
+    snprintf(status_text, sizeof(status_text), "Wi-Fi unavailable. Move closer to the router.");
+    return 0;
 }
 
 static unsigned int parse_video_duration(const char *text) {
@@ -79,18 +145,19 @@ static unsigned int parse_video_duration(const char *text) {
 }
 
 static int connect_relay(const char *resource) {
-    if (!wifi_initialized) {
-        snprintf(status_text, sizeof(status_text), "Connecting to configured Wi-Fi...");
-        if (!Wifi_InitDefault(WFC_CONNECT)) {
-            snprintf(status_text, sizeof(status_text), "Wi-Fi setup failed; check console settings.");
-            return -1;
-        }
-        wifi_initialized = 1;
+    if (!ensure_wifi_associated()) {
+        return -1;
     }
 
     int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd < 0) {
         snprintf(status_text, sizeof(status_text), "Could not open network socket.");
+        return -1;
+    }
+    int nonblocking = 1;
+    if (ioctl(socket_fd, FIONBIO, &nonblocking) < 0) {
+        snprintf(status_text, sizeof(status_text), "Could not enable responsive relay requests.");
+        closesocket(socket_fd);
         return -1;
     }
 
@@ -100,7 +167,37 @@ static int connect_relay(const char *resource) {
     address.sin_port = htons(SERVER_PORT);
     address.sin_addr.s_addr = inet_addr(SERVER_IP);
     snprintf(status_text, sizeof(status_text), "Contacting relay at %s...", SERVER_IP);
-    if (connect(socket_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+    int connected = connect(socket_fd, (struct sockaddr *)&address, sizeof(address)) == 0;
+    if (!connected && errno != EINPROGRESS && errno != EALREADY &&
+        errno != EWOULDBLOCK) {
+        snprintf(status_text, sizeof(status_text), "Relay connection failed at %s.", SERVER_IP);
+        closesocket(socket_fd);
+        return -1;
+    }
+    unsigned int waited_frames = 0;
+    while (!connected && waited_frames < REQUEST_TIMEOUT_FRAMES) {
+        int socket_error = 0;
+        socklen_t error_length = sizeof(socket_error);
+        if (getsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) < 0) {
+            socket_error = errno;
+        }
+        if (socket_error != 0 && socket_error != EINPROGRESS &&
+            socket_error != EALREADY && socket_error != EWOULDBLOCK) {
+            break;
+        }
+        struct sockaddr_storage peer;
+        socklen_t peer_length = sizeof(peer);
+        if (getpeername(socket_fd, (struct sockaddr *)&peer, &peer_length) == 0) {
+            connected = 1;
+            break;
+        }
+        if (!network_wait_frame()) {
+            closesocket(socket_fd);
+            return -1;
+        }
+        waited_frames++;
+    }
+    if (!connected) {
         snprintf(status_text, sizeof(status_text), "Relay connection failed at %s.", SERVER_IP);
         closesocket(socket_fd);
         return -1;
@@ -111,7 +208,7 @@ static int connect_relay(const char *resource) {
              "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n",
              resource, SERVER_IP);
     if (!send_all(socket_fd, request, (unsigned int)strlen(request))) {
-        snprintf(status_text, sizeof(status_text), "Could not send relay request.");
+        snprintf(status_text, sizeof(status_text), "Relay request stopped or timed out.");
         closesocket(socket_fd);
         return -1;
     }
@@ -147,16 +244,29 @@ static int refresh_wifi_strength(void) {
     return 1;
 }
 
-static int reader_read_exact(SocketReader *reader, unsigned char *output, unsigned int wanted) {
+static int reader_read_exact_timeout(SocketReader *reader, unsigned char *output,
+                                     unsigned int wanted, unsigned int idle_timeout) {
     unsigned int copied = 0;
+    unsigned int idle_frames = 0;
     while (copied < wanted) {
         if (reader->offset == reader->length) {
             int received = recv(reader->socket_fd, reader->buffer, sizeof(reader->buffer), 0);
-            if (received <= 0) {
+            if (received == 0) {
+                return 0;
+            }
+            if (received < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK ||
+                    errno == EINPROGRESS || errno == EALREADY) {
+                    if (++idle_frames >= idle_timeout || !network_wait_frame()) {
+                        return 0;
+                    }
+                    continue;
+                }
                 return 0;
             }
             reader->offset = 0;
             reader->length = (unsigned int)received;
+            idle_frames = 0;
         }
 
         unsigned int available = reader->length - reader->offset;
@@ -171,10 +281,16 @@ static int reader_read_exact(SocketReader *reader, unsigned char *output, unsign
     return 1;
 }
 
-static int reader_read_headers(SocketReader *reader, char *headers, unsigned int capacity) {
+static int reader_read_exact(SocketReader *reader, unsigned char *output, unsigned int wanted) {
+    return reader_read_exact_timeout(reader, output, wanted, REQUEST_TIMEOUT_FRAMES);
+}
+
+static int reader_read_headers_timeout(SocketReader *reader, char *headers,
+                                      unsigned int capacity, unsigned int idle_timeout) {
     unsigned int length = 0;
     while (length + 1 < capacity) {
-        if (!reader_read_exact(reader, (unsigned char *)&headers[length], 1)) {
+        if (!reader_read_exact_timeout(reader, (unsigned char *)&headers[length],
+                                       1, idle_timeout)) {
             return 0;
         }
         length++;
@@ -184,6 +300,10 @@ static int reader_read_headers(SocketReader *reader, char *headers, unsigned int
         }
     }
     return 0;
+}
+
+static int reader_read_headers(SocketReader *reader, char *headers, unsigned int capacity) {
+    return reader_read_headers_timeout(reader, headers, capacity, REQUEST_TIMEOUT_FRAMES);
 }
 
 static void encode_query(char *encoded, unsigned int capacity) {
@@ -268,17 +388,158 @@ static void perform_search(void) {
         return;
     }
 
+    unsigned int idle_frames = 0;
+    int request_failed = 0;
     while (response_length + 1 < sizeof(response)) {
         int count = recv(socket_fd, response + response_length,
                          sizeof(response) - response_length - 1, 0);
-        if (count <= 0) {
+        if (count > 0) {
+            response_length += (unsigned int)count;
+            idle_frames = 0;
+            continue;
+        }
+        if (count == 0) {
             break;
         }
-        response_length += (unsigned int)count;
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS ||
+            errno == EALREADY) {
+            if (++idle_frames >= REQUEST_TIMEOUT_FRAMES || !network_wait_frame()) {
+                request_failed = 1;
+                break;
+            }
+            continue;
+        }
+        request_failed = 1;
+        break;
+    }
+    closesocket(socket_fd);
+    if (request_failed) {
+        snprintf(status_text, sizeof(status_text), "Relay search stopped or timed out.");
+        return;
     }
     response[response_length] = '\0';
-    closesocket(socket_fd);
     copy_result_rows(response);
+}
+
+static int read_content_length(const char *headers, unsigned long *length) {
+    const char *value = strstr(headers, "Content-Length:");
+    if (value == NULL) {
+        return 0;
+    }
+    value += strlen("Content-Length:");
+    while (*value == ' ' || *value == '\t') {
+        value++;
+    }
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (end == value || parsed == 0 || parsed > FASTVIDEO_MAX_FILE_SIZE) {
+        return 0;
+    }
+    *length = parsed;
+    return 1;
+}
+
+static void download_selected_fastvideo(void) {
+    if (selected_video >= video_count) {
+        snprintf(status_text, sizeof(status_text), "Select a video first.");
+        return;
+    }
+    if (!fat_initialized) {
+        snprintf(status_text, sizeof(status_text), "Checking SD card...");
+        gui_draw(query, alphabet[alphabet_index], status_text, video_titles,
+                 video_count, selected_video, wifi_strength, 0);
+        if (!fatInitDefault()) {
+            snprintf(status_text, sizeof(status_text), "SD card unavailable.");
+            return;
+        }
+        fat_initialized = 1;
+    }
+
+    const char *destination = isDSiMode() ? "sd:/testVideo.fv" : "fat:/testVideo.fv";
+    const char *temporary = isDSiMode() ? "sd:/testVideo.part" : "fat:/testVideo.part";
+    char resource[64];
+    char headers[512];
+    snprintf(resource, sizeof(resource), "/fastvideo?id=%s", video_ids[selected_video]);
+    snprintf(status_text, sizeof(status_text), "Preparing FastVideoDS on relay...");
+    gui_draw(query, alphabet[alphabet_index], status_text, video_titles,
+             video_count, selected_video, wifi_strength, 0);
+
+    int socket_fd = connect_relay(resource);
+    if (socket_fd < 0) {
+        return;
+    }
+    SocketReader reader = {socket_fd, {0}, 0, 0};
+    if (!reader_read_headers_timeout(&reader, headers, sizeof(headers),
+                                     FASTVIDEO_PREP_TIMEOUT_FRAMES) ||
+        strstr(headers, " 200 ") == NULL) {
+        snprintf(status_text, sizeof(status_text), "FastVideo relay failed. Configure encoder.");
+        closesocket(socket_fd);
+        return;
+    }
+
+    unsigned long content_length = 0;
+    if (!read_content_length(headers, &content_length)) {
+        snprintf(status_text, sizeof(status_text), "Invalid or oversized FVDS file.");
+        closesocket(socket_fd);
+        return;
+    }
+    FILE *output = fopen(temporary, "wb");
+    if (output == NULL) {
+        snprintf(status_text, sizeof(status_text), "Cannot write to SD card.");
+        closesocket(socket_fd);
+        return;
+    }
+
+    unsigned char chunk[4096];
+    unsigned long written = 0;
+    int transfer_ok = 1;
+    while (written < content_length) {
+        unsigned int amount = (unsigned int)(content_length - written);
+        if (amount > sizeof(chunk)) {
+            amount = sizeof(chunk);
+        }
+        if (!reader_read_exact(&reader, chunk, amount) ||
+            fwrite(chunk, 1, amount, output) != amount) {
+            transfer_ok = 0;
+            break;
+        }
+        written += amount;
+        if ((written & 0xFFFFUL) < sizeof(chunk) || written == content_length) {
+            snprintf(status_text, sizeof(status_text), "Saving FVDS %lu%%",
+                     written * 100 / content_length);
+            gui_draw(query, alphabet[alphabet_index], status_text, video_titles,
+                     video_count, selected_video, wifi_strength, 0);
+        }
+    }
+    closesocket(socket_fd);
+    if (fclose(output) != 0) {
+        transfer_ok = 0;
+    }
+    if (!transfer_ok) {
+        remove(temporary);
+        snprintf(status_text, sizeof(status_text), "FastVideo transfer cancelled or failed.");
+        return;
+    }
+
+    output = fopen(temporary, "rb");
+    unsigned char signature[4];
+    int valid_file = output != NULL && fread(signature, 1, sizeof(signature), output) == sizeof(signature) &&
+                     memcmp(signature, "FVDS", sizeof(signature)) == 0;
+    if (output != NULL) {
+        fclose(output);
+    }
+    if (!valid_file) {
+        remove(temporary);
+        snprintf(status_text, sizeof(status_text), "Downloaded file is not valid FVDS.");
+        return;
+    }
+    remove(destination);
+    if (rename(temporary, destination) != 0) {
+        remove(temporary);
+        snprintf(status_text, sizeof(status_text), "Could not finalize FVDS on SD.");
+        return;
+    }
+    snprintf(status_text, sizeof(status_text), "Saved SD:/TESTVIDEO.FV. Open FVDS Player.");
 }
 
 static int update_player_controls(int pressed, int *playing, int *paused,
@@ -610,6 +871,12 @@ int main(void) {
                     query[--query_length] = '\0';
                     gui_dirty = 1;
                 }
+                break;
+            case GUI_TOUCH_DOWNLOAD:
+                keyboard_visible = 0;
+                gui_dirty = 0;
+                download_selected_fastvideo();
+                gui_dirty = 1;
                 break;
             case GUI_TOUCH_WATCH:
                 play_selected_video();

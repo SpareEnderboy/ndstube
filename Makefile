@@ -31,7 +31,7 @@ CFLAGS := -g -Wall -Wextra -O2 -ffunction-sections -fdata-sections $(ARCH)
 CFLAGS += $(INCLUDE) -DARM9
 ASFLAGS := -g $(ARCH)
 LDFLAGS = -specs=ds_arm9.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
-LIBS := -ldswifi9 -lnds9
+LIBS := -ldswifi9 -lnds9 -lfat
 LIBDIRS := $(LIBNDS)
 
 $(GAME_ICON): $(ICON_ASSETS)/icon.h $(ICON_ASSETS)/icon.img.bin $(ICON_ASSETS)/icon.pal.bin $(PROJECT_ROOT)tools/icon_to_bmp.py

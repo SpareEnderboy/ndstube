@@ -7,9 +7,13 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import tempfile
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 VIDEO_WIDTH = 128
@@ -18,6 +22,12 @@ VIDEO_FPS = 6
 AUDIO_RATE = 8000
 MAX_VIDEO_SECONDS = 120
 VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
+FASTVIDEO_CACHE_DIR = Path(os.environ.get(
+    "NDSTUBE_FASTVIDEO_CACHE", Path.home() / ".cache" / "ndstube" / "fastvideo"
+))
+FASTVIDEO_ENCODER = os.environ.get("NDSTUBE_FASTVIDEO_ENCODER", "")
+_FASTVIDEO_LOCKS: dict[str, threading.Lock] = {}
+_FASTVIDEO_LOCKS_GUARD = threading.Lock()
 
 
 def parse_search_query(raw_query: str) -> str:
@@ -119,6 +129,78 @@ def start_audio_encoder(source_url: str, sample_count: int) -> subprocess.Popen:
     return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
 
 
+def _fastvideo_lock(video_id: str) -> threading.Lock:
+    with _FASTVIDEO_LOCKS_GUARD:
+        return _FASTVIDEO_LOCKS.setdefault(video_id, threading.Lock())
+
+
+def _download_fastvideo_source(video_id: str, directory: Path) -> Path:
+    try:
+        import yt_dlp
+    except ImportError as error:
+        raise RuntimeError("Install service requirements with: pip install -r service/requirements.txt") from error
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "format": "bestvideo[height<=240]+bestaudio/bestvideo+bestaudio/best",
+        "outtmpl": str(directory / "source.%(ext)s"),
+        "merge_output_format": "mkv",
+        "download_ranges": lambda _info, _downloader: [{
+            "start_time": 0,
+            "end_time": MAX_VIDEO_SECONDS,
+        }],
+        "force_keyframes_at_cuts": True,
+    }
+    with yt_dlp.YoutubeDL(options) as downloader:
+        downloader.download([f"https://www.youtube.com/watch?v={video_id}"])
+
+    candidates = [
+        path for path in directory.glob("source.*")
+        if path.is_file() and not path.name.endswith((".part", ".ytdl"))
+    ]
+    if not candidates:
+        raise RuntimeError("yt-dlp did not produce a downloaded video file")
+    return max(candidates, key=lambda path: path.stat().st_size)
+
+
+def ensure_fastvideo_file(video_id: str) -> Path:
+    if not FASTVIDEO_ENCODER.strip():
+        raise RuntimeError("Set NDSTUBE_FASTVIDEO_ENCODER to the FastVideoDSEncoder executable")
+
+    FASTVIDEO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cached_file = FASTVIDEO_CACHE_DIR / f"{video_id}.fv"
+    if cached_file.is_file() and cached_file.stat().st_size >= 0x1C:
+        return cached_file
+
+    with _fastvideo_lock(video_id):
+        if cached_file.is_file() and cached_file.stat().st_size >= 0x1C:
+            return cached_file
+
+        encoder_command = shlex.split(FASTVIDEO_ENCODER)
+        if not encoder_command:
+            raise RuntimeError("NDSTUBE_FASTVIDEO_ENCODER is empty")
+        with tempfile.TemporaryDirectory(prefix="ndstube-fastvideo-") as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            source_file = _download_fastvideo_source(video_id, temporary_path)
+            output_file = temporary_path / "output.fv"
+            subprocess.run(
+                [*encoder_command, str(source_file), str(output_file)],
+                check=True,
+                timeout=1800,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            if not output_file.is_file() or output_file.stat().st_size < 0x1C:
+                raise RuntimeError("FastVideoDSEncoder did not produce a valid .fv file")
+            with output_file.open("rb") as encoded:
+                if encoded.read(4) != b"FVDS":
+                    raise RuntimeError("FastVideoDSEncoder output has an invalid FVDS signature")
+            os.replace(output_file, cached_file)
+    return cached_file
+
+
 def audio_samples_for_frame(frame_index: int) -> int:
     return ((frame_index + 1) * AUDIO_RATE // VIDEO_FPS) - (frame_index * AUDIO_RATE // VIDEO_FPS)
 
@@ -146,6 +228,9 @@ class RelayHandler(BaseHTTPRequestHandler):
         if request.path == "/video":
             self._serve_video(parse_qs(request.query).get("id", [""])[0])
             return
+        if request.path == "/fastvideo":
+            self._serve_fastvideo(parse_qs(request.query).get("id", [""])[0])
+            return
         if request.path != "/search":
             self._send(404, "text/plain; charset=utf-8", "not found\n")
             return
@@ -161,6 +246,30 @@ class RelayHandler(BaseHTTPRequestHandler):
             return
 
         self._send(200, "text/plain; charset=utf-8", results)
+
+    def _serve_fastvideo(self, raw_video_id: str) -> None:
+        try:
+            video_id = parse_video_id(raw_video_id)
+            encoded_file = ensure_fastvideo_file(video_id)
+        except ValueError as error:
+            self._send(400, "text/plain; charset=utf-8", f"{error}\n")
+            return
+        except Exception as error:
+            self._send(502, "text/plain; charset=utf-8", f"FastVideoDS encoding failed: {error}\n")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(encoded_file.stat().st_size))
+        self.send_header("Content-Disposition", f'attachment; filename="{video_id}.fv"')
+        self.send_header("X-Video-Format", "FastVideoDS")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            with encoded_file.open("rb") as source:
+                shutil.copyfileobj(source, self.wfile, length=16 * 1024)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _serve_video(self, raw_video_id: str) -> None:
         encoder = None
@@ -237,6 +346,10 @@ def main() -> None:
     port = int(os.environ.get("NDSTUBE_PORT", "8080"))
     server = ThreadingHTTPServer((host, port), RelayHandler)
     print(f"ndstube relay listening on http://{host}:{port}")
+    if FASTVIDEO_ENCODER.strip():
+        print("FastVideoDS endpoint enabled")
+    else:
+        print("FastVideoDS endpoint disabled; set NDSTUBE_FASTVIDEO_ENCODER to enable it")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

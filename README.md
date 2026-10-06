@@ -44,6 +44,37 @@ curl --get --data-urlencode 'q=DSi homebrew' http://127.0.0.1:8080/search
 
 Set `NDSTUBE_PORT` to change the port. Allow inbound TCP on that port only from the trusted LAN if the host firewall is enabled. The `/video?id=VIDEO_ID` endpoint returns a bounded interleaved stream: one raw RGB8 frame followed by the corresponding 8 kHz signed mono PCM block. It requires yt-dlp and the system `ffmpeg` executable.
 
+### FastVideoDS SD Handoff
+
+The bottom-screen `GET FV` action requests `/fastvideo?id=VIDEO_ID`. The relay downloads up to the first 120 seconds, runs the separate FastVideoDS encoder, and caches the resulting `.fv` file under `~/.cache/ndstube/fastvideo`. The client streams it to `sd:/testVideo.fv`; after it reports completion, launch FastVideoDS Player from the DSi menu to play that file. This is an SD-card handoff, not in-app FastVideoDS playback.
+
+Build the upstream encoder on an x86-64 host with AVX2 and the .NET SDK, following [FastVideoDSEncoder](https://github.com/Gericom/FastVideoDSEncoder). Its FFmpeg.AutoGen 5.1 binding requires FFmpeg 5.1 shared libraries; the encoder's published `x64` folder only contains Windows DLLs. With micromamba installed, create an isolated compatible runtime and publish the encoder to a persistent user-local directory:
+
+```sh
+"$HOME/.local/bin/micromamba" create -y -p "$HOME/.local/share/ndstube/ffmpeg51" -c conda-forge 'ffmpeg=5.1.2'
+git clone https://github.com/Gericom/FastVideoDSEncoder.git
+cd FastVideoDSEncoder
+encoder_dir="$HOME/.local/share/ndstube/FastVideoDSEncoder"
+dotnet publish FastVideoDSEncoder/FastVideoDSEncoder.csproj -c Release -r linux-x64 --self-contained false -o "$encoder_dir"
+ffmpeg_libs="$HOME/.local/share/ndstube/ffmpeg51/lib"
+mkdir -p "$encoder_dir/x64"
+for spec in avcodec:59 avdevice:59 avfilter:8 avformat:59 avutil:57 postproc:56 swresample:4 swscale:6; do
+	name=${spec%%:*}
+	version=${spec##*:}
+	ln -sf "$ffmpeg_libs/lib${name}.so.${version}" "$encoder_dir/x64/lib${name}.so.${version}"
+done
+```
+
+Start the relay with the published encoder and its FFmpeg runtime:
+
+```sh
+ffmpeg_libs="$HOME/.local/share/ndstube/ffmpeg51/lib"
+encoder_dir="$HOME/.local/share/ndstube/FastVideoDSEncoder"
+NDSTUBE_FASTVIDEO_ENCODER="env LD_LIBRARY_PATH=$ffmpeg_libs $encoder_dir/FastVideoDSEncoder -j 1" python /path/to/ndstube/service/server.py
+```
+
+Set `NDSTUBE_FASTVIDEO_CACHE` to change the cache directory. The first request for a video may take several minutes because the relay must download and encode it; later requests for the same video use the cache. The SD card must have enough free space for `testVideo.fv`. The client needs libfat/DLDI SD access, and the FastVideoDS Player must already be installed separately.
+
 ## Build The Client
 
 The Makefile defaults to `/opt/devkitpro` and `/opt/devkitpro/devkitARM`. For a custom installation, set the paths before building:
