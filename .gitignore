@@ -3,3 +3,5 @@ __pycache__/
 *.py[cod]
 *.nds
 /ui mockups/
+/.vs
+/sd.zip
