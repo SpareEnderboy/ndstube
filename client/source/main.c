@@ -11,9 +11,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
-#define SERVER_IP "172.20.50.68"
-#define SERVER_PORT 8080
+#define DEFAULT_SERVER_IP "127.0.0.1"
+#define DEFAULT_SERVER_PORT 8080
 #define RESPONSE_CAPACITY 4096
 #define MAX_RESULTS GUI_RESULT_SLOTS
 #define VIDEO_WIDTH 128
@@ -39,11 +40,114 @@ static unsigned int video_count;
 static unsigned int selected_video;
 static unsigned char video_frame[VIDEO_FRAME_SIZE];
 static signed char audio_block[AUDIO_BLOCK_SIZE];
-static char status_text[80] = "Set the relay IP in source, then search.";
+static char status_text[80] = "Put relay config on SD:/ndstube.conf and press START to search.";
+static char server_ip[32] = DEFAULT_SERVER_IP;
+static int server_port = DEFAULT_SERVER_PORT;
+static int config_loaded = 0;
 static int wifi_initialized;
 static unsigned int wifi_strength;
 static unsigned int wifi_refresh_frames;
 static int fat_initialized;
+
+static void trim_whitespace(char *s) {
+    char *start = s;
+    while (*start && isspace((unsigned char)*start)) start++;
+    if (start != s) memmove(s, start, strlen(start) + 1);
+    char *end = s + strlen(s) - 1;
+    while (end >= s && isspace((unsigned char)*end)) { *end = '\0'; end--; }
+}
+
+static void load_server_config(void) {
+    if (config_loaded) return;
+    const char *paths[2];
+    FILE *f = NULL;
+    char line[128];
+
+    if (!fatInitDefault()) {
+        /* SD not available; keep defaults */
+        return;
+    }
+    fat_initialized = 1;
+
+    if (isDSiMode()) {
+        paths[0] = "sd:/ndstube.conf";
+        paths[1] = "fat:/ndstube.conf";
+    } else {
+        paths[0] = "fat:/ndstube.conf";
+        paths[1] = "sd:/ndstube.conf";
+    }
+
+    for (int i = 0; i < 2; i++) {
+        f = fopen(paths[i], "r");
+        if (f != NULL) break;
+    }
+    if (f == NULL) {
+        return;
+    }
+
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\0' || *p == '\n' || *p == '\r') continue;
+        trim_whitespace(p);
+        /* try IP:PORT */
+        int parsed_port = 0;
+        char ipbuf[32] = {0};
+        if (sscanf(p, "%31[^:]:%d", ipbuf, &parsed_port) == 2) {
+            strncpy(server_ip, ipbuf, sizeof(server_ip) - 1);
+            server_port = parsed_port;
+            config_loaded = 1;
+            break;
+        }
+        /* try KEY=VALUE pairs */
+        char *eq = strchr(p, '=');
+        if (eq != NULL) {
+            *eq = '\0';
+            char *key = p;
+            char *val = eq + 1;
+            trim_whitespace(key);
+            trim_whitespace(val);
+            for (char *c = key; *c; ++c) *c = (char)tolower((unsigned char)*c);
+            if (strcmp(key, "server") == 0) {
+                if (sscanf(val, "%31[^:]:%d", ipbuf, &parsed_port) == 2) {
+                    strncpy(server_ip, ipbuf, sizeof(server_ip) - 1);
+                    server_port = parsed_port;
+                    config_loaded = 1;
+                    break;
+                } else {
+                    strncpy(server_ip, val, sizeof(server_ip) - 1);
+                    config_loaded = 1;
+                }
+            } else if (strcmp(key, "ip") == 0) {
+                strncpy(server_ip, val, sizeof(server_ip) - 1);
+                config_loaded = 1;
+            } else if (strcmp(key, "port") == 0) {
+                int v = atoi(val);
+                if (v > 0) { server_port = v; config_loaded = 1; }
+            }
+        } else {
+            /* try plain IP or PORT or ip port */
+            if (sscanf(p, "%31s %d", ipbuf, &parsed_port) >= 1) {
+                if (parsed_port > 0) {
+                    strncpy(server_ip, ipbuf, sizeof(server_ip) - 1);
+                    server_port = parsed_port;
+                    config_loaded = 1;
+                    break;
+                } else if (strchr(ipbuf, '.')) {
+                    strncpy(server_ip, ipbuf, sizeof(server_ip) - 1);
+                    config_loaded = 1;
+                } else {
+                    int v = atoi(ipbuf);
+                    if (v > 0) { server_port = v; config_loaded = 1; }
+                }
+            }
+        }
+    }
+    fclose(f);
+    if (config_loaded) {
+        snprintf(status_text, sizeof(status_text), "Loaded relay %s:%d from SD.", server_ip, server_port);
+    }
+}
 
 typedef struct {
     int socket_fd;
@@ -159,13 +263,13 @@ static int connect_relay(const char *resource) {
     struct sockaddr_in address;
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
-    address.sin_port = htons(SERVER_PORT);
-    address.sin_addr.s_addr = inet_addr(SERVER_IP);
-    snprintf(status_text, sizeof(status_text), "Contacting relay at %s...", SERVER_IP);
+    address.sin_port = htons(server_port);
+    address.sin_addr.s_addr = inet_addr(server_ip);
+    snprintf(status_text, sizeof(status_text), "Contacting relay at %s...", server_ip);
     int connected = connect(socket_fd, (struct sockaddr *)&address, sizeof(address)) == 0;
     if (!connected && errno != EINPROGRESS && errno != EALREADY &&
         errno != EWOULDBLOCK) {
-        snprintf(status_text, sizeof(status_text), "Relay connection failed at %s.", SERVER_IP);
+        snprintf(status_text, sizeof(status_text), "Relay connection failed at %s.", server_ip);
         closesocket(socket_fd);
         return -1;
     }
@@ -193,7 +297,7 @@ static int connect_relay(const char *resource) {
         waited_frames++;
     }
     if (!connected) {
-        snprintf(status_text, sizeof(status_text), "Relay connection failed at %s.", SERVER_IP);
+        snprintf(status_text, sizeof(status_text), "Relay connection failed at %s.", server_ip);
         closesocket(socket_fd);
         return -1;
     }
@@ -201,7 +305,7 @@ static int connect_relay(const char *resource) {
     char request[400];
     snprintf(request, sizeof(request),
              "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n",
-             resource, SERVER_IP);
+             resource, server_ip);
     if (!send_all(socket_fd, request, (unsigned int)strlen(request))) {
         snprintf(status_text, sizeof(status_text), "Relay request stopped or timed out.");
         closesocket(socket_fd);
@@ -773,6 +877,8 @@ int main(void) {
     } else {
         snprintf(status_text, sizeof(status_text), "DS mode: standard ARM9 clock and memory.");
     }
+    /* Attempt to load server IP/port from SD card configuration */
+    load_server_config();
     int gui_dirty = 1;
     int keyboard_visible = 0;
     wifi_strength = read_wifi_strength();
